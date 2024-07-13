@@ -3,10 +3,8 @@
   "version": "0.0.0",
   "license": "MIT",
   "scripts": {
-    "build": "tsc -p tsconfig.json && tsc -p tsconfig-cjs.json",
-    "clean": "rm -rf ./dist",
-    "prepublishOnly": "yarn build",
-    "lint": "eslint . --ext .js,.jsx,.ts,.tsx"
+    "liquidator": "ts-node src/liquidator.ts",
+    "settler": "ts-node src/settler.ts"
   },
   "dependencies": {
     "@parcl-oss/v3-sdk": "0.0.0",
@@ -15,12 +13,14 @@
     "@solana/web3.js": "^1.89.0",
     "bs58": "^5.0.0",
     "decimal.js": "^10.4.3",
-    "dotenv": "^16.3.1"
+    "dotenv": "^16.3.1",
+    "promise-retry": "^2.0.1"
   },
   "devDependencies": {
     "@types/bn.js": "^5.1.5",
     "@types/bs58": "^4.0.4",
     "@types/node": "^20.11.0",
+    "@types/promise-retry": "^1.1.6",
     "@typescript-eslint/eslint-plugin": "^6.18.1",
     "@typescript-eslint/parser": "^6.18.1",
     "eslint": "^8.56.0",

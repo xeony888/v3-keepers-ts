@@ -17,6 +17,7 @@ import {
 } from "@solana/web3.js";
 import bs58 from "bs58";
 import * as dotenv from "dotenv";
+import { sendTransaction } from "./sender";
 dotenv.config();
 
 (async function main() {
@@ -70,7 +71,6 @@ async function runSettler({
   payer,
 }: RunSettlerParams): Promise<void> {
   let firstRun = true;
-  // eslint-disable-next-line no-constant-condition
   while (true) {
     if (firstRun) {
       firstRun = false;
@@ -130,12 +130,13 @@ async function processSettlementRequest(
   owners: Address[],
   signers: Signer[],
   feePayer: Address
-): Promise<string> {
-  const { blockhash: recentBlockhash } = await connection.getLatestBlockhash();
+) {
+  const blockhash = await connection.getLatestBlockhash();
   const tx = sdk
     .transactionBuilder()
     .processSettlementRequests(accounts, settlementRequests, ownerTokenAccounts, owners)
     .feePayer(feePayer)
-    .buildSigned(signers, recentBlockhash);
-  return await sendAndConfirmTransaction(connection, tx, signers);
+    .buildSigned(signers, blockhash.blockhash);
+  return await sendTransaction(connection, tx, blockhash, signers);
+  // return await sendAndConfirmTransaction(connection, tx, signers);
 }

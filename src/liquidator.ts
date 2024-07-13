@@ -24,27 +24,29 @@ import {
 } from "@solana/web3.js";
 import bs58 from "bs58";
 import * as dotenv from "dotenv";
+import { sendTransaction } from "./sender";
+import { timer } from "./utils";
 dotenv.config();
 
 (async function main() {
   console.log("Starting liquidator");
-  if (process.env.RPC_URL === undefined) {
+  if (!process.env.RPC_URL) {
     throw new Error("Missing rpc url");
   }
-  if (process.env.LIQUIDATOR_MARGIN_ACCOUNT === undefined) {
+  if (!process.env.LIQUIDATOR_MARGIN_ACCOUNT) {
     throw new Error("Missing liquidator margin account");
   }
-  if (process.env.PRIVATE_KEY === undefined) {
+  if (!process.env.PRIVATE_KEY) {
     throw new Error("Missing liquidator signer");
   }
   // Note: only handling single exchange
   const [exchangeAddress] = getExchangePda(0);
-  const liquidatorMarginAccount = translateAddress(process.env.LIQUIDATOR_MARGIN_ACCOUNT);
-  const liquidatorSigner = Keypair.fromSecretKey(bs58.decode(process.env.PRIVATE_KEY));
+  const liquidatorMarginAccount = translateAddress(process.env.LIQUIDATOR_MARGIN_ACCOUNT!);
+  const liquidatorSigner = Keypair.fromSecretKey(bs58.decode(process.env.PRIVATE_KEY!));
   const interval = parseInt(process.env.INTERVAL ?? "300");
   const commitment = process.env.COMMITMENT as Commitment | undefined;
-  const sdk = new ParclV3Sdk({ rpcUrl: process.env.RPC_URL, commitment });
-  const connection = new Connection(process.env.RPC_URL, commitment);
+  const sdk = new ParclV3Sdk({ rpcUrl: process.env.RPC_URL!, commitment });
+  const connection = new Connection(process.env.RPC_URL!, commitment);
   await runLiquidator({
     sdk,
     connection,
@@ -93,11 +95,12 @@ async function runLiquidator({
       allMarketAddresses.push(market);
     }
     const allMarkets = await sdk.accountFetcher.getMarkets(allMarketAddresses);
-    const [[markets, priceFeeds], allMarginAccounts] = await Promise.all([
+    const { result: [[markets, priceFeeds], allMarginAccounts], time } = await timer(async () => await Promise.all([
       getMarketMapAndPriceFeedMap(sdk, allMarkets),
       sdk.accountFetcher.getAllMarginAccounts(),
-    ]);
-    console.log(`Fetched ${allMarginAccounts.length} margin accounts`);
+    ]));
+
+    console.log(`Fetched ${allMarginAccounts.length} margin accounts in ${time / 1000}s`);
     for (const rawMarginAccount of allMarginAccounts) {
       const marginAccount = new MarginAccountWrapper(
         rawMarginAccount.account,
@@ -144,7 +147,7 @@ async function runLiquidator({
           [liquidatorSigner],
           liquidatorSigner.publicKey
         );
-        console.log("Signature: ", signature);
+        console.log("Signature: ", JSON.stringify(signature));
       }
     }
   }
@@ -202,13 +205,13 @@ async function liquidate(
   signers: Signer[],
   feePayer: Address,
   params?: LiquidateParams
-): Promise<string> {
+) {
   const [marketAddresses, priceFeedAddresses] = getMarketsAndPriceFeeds(marginAccount, markets);
-  const { blockhash: recentBlockhash } = await connection.getLatestBlockhash();
+  const blockhash = await connection.getLatestBlockhash();
   const tx = sdk
     .transactionBuilder()
     .liquidate(accounts, marketAddresses, priceFeedAddresses, params)
     .feePayer(feePayer)
-    .buildSigned(signers, recentBlockhash);
-  return await sendAndConfirmTransaction(connection, tx, signers);
+    .buildSigned(signers, blockhash.blockhash);
+  return await sendTransaction(connection, tx, blockhash, signers);
 }
