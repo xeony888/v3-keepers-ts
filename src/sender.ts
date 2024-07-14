@@ -82,10 +82,9 @@ export async function sendTransaction(
     ]);
   } catch (e) {
     if (e instanceof TransactionExpiredBlockheightExceededError) {
-      // we consume this error and getTransaction would return null
+      // useless error
       return null;
     } else {
-      // invalid state from web3.js
       throw e;
     }
   } finally {

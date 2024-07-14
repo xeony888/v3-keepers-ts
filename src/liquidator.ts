@@ -20,41 +20,73 @@ import {
   Keypair,
   PublicKey,
   Signer,
-  sendAndConfirmTransaction,
 } from "@solana/web3.js";
 import bs58 from "bs58";
 import * as dotenv from "dotenv";
 import { sendTransaction } from "./sender";
-import { timer } from "./utils";
+import { distanceToLiquidation, getMarketMapAndPriceFeedMap, isUsed, now_seconds, retrieveAllActiveMarginAccounts, timer } from "./utils";
+import { isMainThread, parentPort, Worker, workerData } from "worker_threads";
+import { createClient } from "redis";
+import fs from 'fs';
 dotenv.config();
 
+if (!process.env.RPC_URL) {
+  throw new Error("Missing rpc url");
+}
+if (!process.env.LIQUIDATOR_MARGIN_ACCOUNT) {
+  throw new Error("Missing liquidator margin account");
+}
+if (!process.env.PRIVATE_KEY) {
+  throw new Error("Missing liquidator signer");
+}
+const THREAD_COUNT: number = 6;
 (async function main() {
-  console.log("Starting liquidator");
-  if (!process.env.RPC_URL) {
-    throw new Error("Missing rpc url");
-  }
-  if (!process.env.LIQUIDATOR_MARGIN_ACCOUNT) {
-    throw new Error("Missing liquidator margin account");
-  }
-  if (!process.env.PRIVATE_KEY) {
-    throw new Error("Missing liquidator signer");
-  }
-  // Note: only handling single exchange
+  const redis = createClient();
+  await redis.connect();
+  await redis.del("activeMarginAccounts");
   const [exchangeAddress] = getExchangePda(0);
+  const commitment = process.env.COMMITMENT as Commitment | undefined;
   const liquidatorMarginAccount = translateAddress(process.env.LIQUIDATOR_MARGIN_ACCOUNT!);
   const liquidatorSigner = Keypair.fromSecretKey(bs58.decode(process.env.PRIVATE_KEY!));
   const interval = parseInt(process.env.INTERVAL ?? "300");
-  const commitment = process.env.COMMITMENT as Commitment | undefined;
-  const sdk = new ParclV3Sdk({ rpcUrl: process.env.RPC_URL!, commitment });
-  const connection = new Connection(process.env.RPC_URL!, commitment);
-  await runLiquidator({
-    sdk,
-    connection,
-    interval,
-    exchangeAddress,
-    liquidatorSigner,
-    liquidatorMarginAccount,
-  });
+  if (isMainThread) {
+    console.log("Starting liquidator (main)");
+    // Note: only handling single exchange
+
+    const sdk = new ParclV3Sdk({ rpcUrl: process.env.RPC_URL!, commitment });
+    const exchange = await sdk.accountFetcher.getExchange(exchangeAddress);
+    if (!exchange) throw new Error("Could not get exchange");
+    const exchangeWrapper = new ExchangeWrapper(exchange);
+    const allMarketAddresses: PublicKey[] = exchange.marketIds.filter(marketId => marketId != 0).map(marketId => getMarketPda(exchangeAddress, marketId)[0]);
+    // let activeMarginAccounts = await retrieveAllActiveMarginAccounts(sdk, exchange, exchangeWrapper, allMarketAddresses);
+
+
+    const worker1 = new Worker("./src/worker.js", { workerData: { task: "activeMarginAccounts" } });
+    // spawn 10 seperate threads, each responsible for 
+    let start: number = 0;
+    let end: number = 0;
+    for (let i = 0; i < THREAD_COUNT; i++) {
+      // 2^i+2 threads
+      if (i == THREAD_COUNT - 1) {
+        start = end;
+        end = Infinity;
+      } else {
+        const temp = end;
+        start = temp;
+        end = temp + 2 ** (i + 2);
+      }
+      const w = new Worker("./src/worker.js", { workerData: { task: "accountCheckAndLiquidate", slice: [start, end], interval: 10 * 2 ** i } });
+    }
+    // await runLiquidator({
+    //   sdk,
+    //   connection,
+    //   interval,
+    //   exchangeAddress,
+    //   liquidatorSigner,
+    //   liquidatorMarginAccount,
+    // });
+  } else {
+  }
 })();
 
 type RunLiquidatorParams = {
@@ -74,8 +106,25 @@ async function runLiquidator({
   liquidatorSigner,
   liquidatorMarginAccount,
 }: RunLiquidatorParams): Promise<void> {
+  const exchange = await sdk.accountFetcher.getExchange(exchangeAddress);
+  if (!exchange) throw new Error("Could not get exchange");
+  const exchangeWrapper = new ExchangeWrapper(exchange);
+  const allMarketAddresses: PublicKey[] = exchange.marketIds.filter(marketId => marketId != 0).map(marketId => getMarketPda(exchangeAddress, marketId)[0]);
+
+  const activeMarginAccounts = await retrieveAllActiveMarginAccounts(sdk, exchange, exchangeWrapper, allMarketAddresses);
+
+  fs.writeFileSync("./margins.json", JSON.stringify(activeMarginAccounts));
+  console.log("wrote file");
+  // for (const rawMarginAccount of allMarginAccounts) {
+  //   const marginAccount = new MarginAccountWrapper(
+  //     rawMarginAccount.account,
+  //     rawMarginAccounts.address
+  //   );
+  //   const margins = marginAccount.getAccountMargins(exchangeWrapper, markets, priceFeeds, now_seconds());
+  //   console.log(margins);
+  // }
+  return;
   let firstRun = true;
-  // eslint-disable-next-line no-constant-condition
   while (true) {
     if (firstRun) {
       firstRun = false;
@@ -87,7 +136,7 @@ async function runLiquidator({
       throw new Error("Invalid exchange address");
     }
     const allMarketAddresses: PublicKey[] = [];
-    for (const marketId of exchange.marketIds) {
+    for (const marketId of exchange!.marketIds) {
       if (marketId === 0) {
         continue;
       }
@@ -99,7 +148,6 @@ async function runLiquidator({
       getMarketMapAndPriceFeedMap(sdk, allMarkets),
       sdk.accountFetcher.getAllMarginAccounts(),
     ]));
-
     console.log(`Fetched ${allMarginAccounts.length} margin accounts in ${time / 1000}s`);
     for (const rawMarginAccount of allMarginAccounts) {
       const marginAccount = new MarginAccountWrapper(
@@ -125,7 +173,7 @@ async function runLiquidator({
         );
       }
       const margins = marginAccount.getAccountMargins(
-        new ExchangeWrapper(exchange),
+        new ExchangeWrapper(exchange!),
         markets,
         priceFeeds,
         Math.floor(Date.now() / 1000)
@@ -153,31 +201,6 @@ async function runLiquidator({
   }
 }
 
-async function getMarketMapAndPriceFeedMap(
-  sdk: ParclV3Sdk,
-  allMarkets: (ProgramAccount<Market> | undefined)[]
-): Promise<[MarketMap, PriceFeedMap]> {
-  const markets: MarketMap = {};
-  for (const market of allMarkets) {
-    if (market === undefined) {
-      continue;
-    }
-    markets[market.account.id] = new MarketWrapper(market.account, market.address);
-  }
-  const allPriceFeedAddresses = (allMarkets as ProgramAccount<Market>[]).map(
-    (market) => market.account.priceFeed
-  );
-  const allPriceFeeds = await sdk.accountFetcher.getPythPriceFeeds(allPriceFeedAddresses);
-  const priceFeeds: PriceFeedMap = {};
-  for (let i = 0; i < allPriceFeeds.length; i++) {
-    const priceFeed = allPriceFeeds[i];
-    if (priceFeed === undefined) {
-      continue;
-    }
-    priceFeeds[allPriceFeedAddresses[i]] = priceFeed;
-  }
-  return [markets, priceFeeds];
-}
 
 function getMarketsAndPriceFeeds(
   marginAccount: MarginAccountWrapper,
