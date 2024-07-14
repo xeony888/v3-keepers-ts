@@ -27,7 +27,6 @@ import { sendTransaction } from "./sender";
 import { distanceToLiquidation, getMarketMapAndPriceFeedMap, isUsed, now_seconds, retrieveAllActiveMarginAccounts, timer } from "./utils";
 import { isMainThread, parentPort, Worker, workerData } from "worker_threads";
 import { createClient } from "redis";
-import fs from 'fs';
 dotenv.config();
 
 if (!process.env.RPC_URL) {
@@ -39,28 +38,33 @@ if (!process.env.LIQUIDATOR_MARGIN_ACCOUNT) {
 if (!process.env.PRIVATE_KEY) {
   throw new Error("Missing liquidator signer");
 }
-const THREAD_COUNT: number = 6;
+const THREAD_COUNT: number = 6; // change if your computer has more threads
 (async function main() {
+  // const [exchangeAddress] = getExchangePda(0);
+  // const commitment = process.env.COMMITMENT as Commitment | undefined;
+  // const connection = new Connection(process.env.RPC_URL!);
+  // const sdk = new ParclV3Sdk({ rpcUrl: process.env.RPC_URL!, commitment });
+  // const liquidatorMarginAccount = translateAddress(process.env.LIQUIDATOR_MARGIN_ACCOUNT!);
+  // const liquidatorSigner = Keypair.fromSecretKey(bs58.decode(process.env.PRIVATE_KEY!));
+  // const interval = parseInt(process.env.INTERVAL ?? "300");
+  // runLiquidator({
+  //   sdk, connection, interval, exchangeAddress, liquidatorMarginAccount, liquidatorSigner
+  // });
+  // return;
   const redis = createClient();
   await redis.connect();
-  await redis.del("activeMarginAccounts");
-  const [exchangeAddress] = getExchangePda(0);
-  const commitment = process.env.COMMITMENT as Commitment | undefined;
-  const liquidatorMarginAccount = translateAddress(process.env.LIQUIDATOR_MARGIN_ACCOUNT!);
-  const liquidatorSigner = Keypair.fromSecretKey(bs58.decode(process.env.PRIVATE_KEY!));
-  const interval = parseInt(process.env.INTERVAL ?? "300");
+  await redis.del("activeMarginAccounts"); // clean up older accounts when start
   if (isMainThread) {
     console.log("Starting liquidator (main)");
     // Note: only handling single exchange
 
-    const sdk = new ParclV3Sdk({ rpcUrl: process.env.RPC_URL!, commitment });
-    const exchange = await sdk.accountFetcher.getExchange(exchangeAddress);
-    if (!exchange) throw new Error("Could not get exchange");
-    const exchangeWrapper = new ExchangeWrapper(exchange);
-    const allMarketAddresses: PublicKey[] = exchange.marketIds.filter(marketId => marketId != 0).map(marketId => getMarketPda(exchangeAddress, marketId)[0]);
+    // const exchange = await sdk.accountFetcher.getExchange(exchangeAddress);
+    // if (!exchange) throw new Error("Could not get exchange");
+    // const exchangeWrapper = new ExchangeWrapper(exchange);
+    // const allMarketAddresses: PublicKey[] = exchange.marketIds.filter(marketId => marketId != 0).map(marketId => getMarketPda(exchangeAddress, marketId)[0]);
     // let activeMarginAccounts = await retrieveAllActiveMarginAccounts(sdk, exchange, exchangeWrapper, allMarketAddresses);
 
-
+    // spawns a worker to periodically get all margin accounts
     const worker1 = new Worker("./src/worker.js", { workerData: { task: "activeMarginAccounts" } });
     // spawn 10 seperate threads, each responsible for 
     let start: number = 0;
@@ -75,17 +79,9 @@ const THREAD_COUNT: number = 6;
         start = temp;
         end = temp + 2 ** (i + 2);
       }
+      // spawns workers of different priority levels. The higher a worker's priority the more often it checks accounts closer to liquidation
       const w = new Worker("./src/worker.js", { workerData: { task: "accountCheckAndLiquidate", slice: [start, end], interval: 10 * 2 ** i } });
     }
-    // await runLiquidator({
-    //   sdk,
-    //   connection,
-    //   interval,
-    //   exchangeAddress,
-    //   liquidatorSigner,
-    //   liquidatorMarginAccount,
-    // });
-  } else {
   }
 })();
 
@@ -108,22 +104,7 @@ async function runLiquidator({
 }: RunLiquidatorParams): Promise<void> {
   const exchange = await sdk.accountFetcher.getExchange(exchangeAddress);
   if (!exchange) throw new Error("Could not get exchange");
-  const exchangeWrapper = new ExchangeWrapper(exchange);
-  const allMarketAddresses: PublicKey[] = exchange.marketIds.filter(marketId => marketId != 0).map(marketId => getMarketPda(exchangeAddress, marketId)[0]);
 
-  const activeMarginAccounts = await retrieveAllActiveMarginAccounts(sdk, exchange, exchangeWrapper, allMarketAddresses);
-
-  fs.writeFileSync("./margins.json", JSON.stringify(activeMarginAccounts));
-  console.log("wrote file");
-  // for (const rawMarginAccount of allMarginAccounts) {
-  //   const marginAccount = new MarginAccountWrapper(
-  //     rawMarginAccount.account,
-  //     rawMarginAccounts.address
-  //   );
-  //   const margins = marginAccount.getAccountMargins(exchangeWrapper, markets, priceFeeds, now_seconds());
-  //   console.log(margins);
-  // }
-  return;
   let firstRun = true;
   while (true) {
     if (firstRun) {
@@ -154,7 +135,7 @@ async function runLiquidator({
         rawMarginAccount.account,
         rawMarginAccount.address
       );
-      if (marginAccount.inLiquidation()) {
+      if (true) { //(marginAccount.inLiquidation()) {
         console.log(`Liquidating account already in liquidation (${marginAccount.address})`);
         await liquidate(
           sdk,
@@ -234,7 +215,7 @@ async function liquidate(
   const tx = sdk
     .transactionBuilder()
     .liquidate(accounts, marketAddresses, priceFeedAddresses, params)
-    .feePayer(feePayer)
-    .buildSigned(signers, blockhash.blockhash);
+    .feePayer(feePayer).buildUnsigned();
+  // .buildSigned(signers, blockhash.blockhash); we are adding more instructions, so we build unsigned for now
   return await sendTransaction(connection, tx, blockhash, signers);
 }

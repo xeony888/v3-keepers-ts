@@ -28,6 +28,7 @@ export async function sendTransaction(
       microLamports: 10000
     })
   );
+  // sign tx
   transaction.sign(...signers);
   const txid = await connection.sendRawTransaction(
     transaction.serialize(),

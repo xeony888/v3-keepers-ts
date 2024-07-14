@@ -1,8 +1,11 @@
 Multithreaded liquidity bot
 
-Change compute limit fee in utils.ts
+Uses Workers to handle multiple threads. 
+Accounts are sorted by priority level - accounts closest to liquidation are checked more often
 
-Check package.json for commands
+Users can change compute limit fee (gas fee) in utils.ts
 
-Install and run redis before operating. Redis is used to share data between threads
+Check package.json for commands to run the liquidator
+
+Install and run redis before operating. Redis is used to share data between threads in a simple way
 

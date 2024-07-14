@@ -31,6 +31,7 @@ dotenv.config();
         const { slice, interval } = workerData;
         console.log(`Worker started, checking ${slice[ 0 ]}-${slice[ 1 ]} every ${interval}s`);
         setInterval(async () => {
+            console.log(`Worker reran, checking ${slice[ 0 ]}-${slice[ 1 ]} every ${interval}s`);
             let data = JSON.parse(await redis.get("activeMarginAccounts")); /// TODO: optimize redis storage to store as array not as string
             if (data) {
                 const sliced = data.slice(slice[ 0 ], slice[ 1 ]);
@@ -46,6 +47,7 @@ dotenv.config();
                     );
                     const margins = marginAccount.getAccountMargins(exchangeWrapper, markets, priceFeeds, now_seconds());
                     if (margins.canLiquidate()) {
+                        console.log(`Liquidating margin account: ${account.address.toString()}`);
                         liquidate(
                             sdk,
                             connection,
@@ -182,8 +184,8 @@ async function liquidate(
     const tx = sdk
         .transactionBuilder()
         .liquidate(accounts, marketAddresses, priceFeedAddresses, params)
-        .feePayer(feePayer)
-        .buildSigned(signers, blockhash.blockhash);
+        .feePayer(feePayer).buildUnsigned();
+    // .buildSigned(signers, blockhash.blockhash);
     return await sendTransaction(connection, tx, blockhash, signers);
 }
 
